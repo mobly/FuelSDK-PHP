@@ -1,18 +1,28 @@
 <?php
+
+namespace ExactTarget;
+
+use Exception;
+use DateInterval;
+use DateTime;
+use JWT;
+use DOMDocument;
+use WSSESoap;
+use SoapVar;
+use stdClass;
+
 require('soap-wsse.php');
 require('JWT.php');
 
-class ET_Client extends SoapClient {
+class ET_Client extends \SoapClient {
 	public $packageName, $packageFolders, $parentFolders;
 	private $wsdlLoc, $debugSOAP, $lastHTTPCode, $clientId, 
 			$clientSecret, $appsignature, $endpoint, 
-			$tenantTokens, $tenantKey, $xmlLoc;
+			$tenantTokens, $tenantKey;
 		
 	function __construct($getWSDL = false, $debug = false, $params = null) {	
 		$tenantTokens = array();
 		$config = false;
-
-		$this->xmlLoc = 'ExactTargetWSDL.xml';
 
 		if (file_exists(realpath(__DIR__ . "/config.php")))
 			$config = include 'config.php';
@@ -22,14 +32,15 @@ class ET_Client extends SoapClient {
 			$this->clientId = $config['clientid'];
 			$this->clientSecret = $config['clientsecret'];
 			$this->appsignature = $config['appsignature'];
-			if (array_key_exists('xmlloc', $config)){$this->xmlLoc = $config['xmlloc'];}
 		} else {
-			if ($params && array_key_exists('defaultwsdl', $params)){$this->wsdlLoc = $params['defaultwsdl'];}
-			else {$this->wsdlLoc = "https://webservice.exacttarget.com/etframework.wsdl";}
+			if ($params && array_key_exists('defaultwsdl', $params)) {
+                $this->wsdlLoc = $params['defaultwsdl'];
+            } else {
+                $this->wsdlLoc = "https://webservice.exacttarget.com/etframework.wsdl";
+            }
 			if ($params && array_key_exists('clientid', $params)){$this->clientId = $params['clientid'];}
 			if ($params && array_key_exists('clientsecret', $params)){$this->clientSecret = $params['clientsecret'];}
 			if ($params && array_key_exists('appsignature', $params)){$this->appsignature = $params['appsignature'];}
-			if ($params && array_key_exists('xmlloc', $params)){$this->xmlLoc = $params['xmlloc'];}
 		}
 		
 		$this->debugSOAP = $debug;
@@ -58,21 +69,22 @@ class ET_Client extends SoapClient {
 			$url = "https://www.exacttargetapis.com/platform/v1/endpoints/soap?access_token=".$this->getAuthToken($this->tenantKey);
 			$endpointResponse = restGet($url);			
 			$endpointObject = json_decode($endpointResponse->body);			
-			if ($endpointObject && property_exists($endpointObject,"url")){
+			if ($endpointResponse && property_exists($endpointObject,"url")){		
 				$this->endpoint = $endpointObject->url;			
 			} else {
 				throw new Exception('Unable to determine stack using /platform/v1/endpoints/:'.$endpointResponse->body);			
 			}
 			} catch (Exception $e) {
 			throw new Exception('Unable to determine stack using /platform/v1/endpoints/: '.$e->getMessage());
-		} 		
-		parent::__construct($this->xmlLoc, array('trace'=>1, 'exceptions'=>0,'connection_timeout'=>120));
+		}
+
+		parent::__construct($this->LocalWsdlPath(), array('trace'=>1, 'exceptions'=>0));
 		parent::__setLocation($this->endpoint);
 	}
 	
 	function refreshToken($forceRefresh = false) {
 		if (property_exists($this, "sdl") && $this->sdl == 0){
-			parent::__construct($this->xmlLoc, array('trace'=>1, 'exceptions'=>0));	
+			parent::__construct($this->LocalWsdlPath(), array('trace'=>1, 'exceptions'=>0));
 		}
 		try {
 			$currentTime = new DateTime();
@@ -121,29 +133,50 @@ class ET_Client extends SoapClient {
 	}
 	
 	function CreateWSDL($wsdlLoc) {
-		
-		try{
-			$getNewWSDL = true;
-			
-			$remoteTS = $this->GetLastModifiedDate($wsdlLoc);
-			
-			if (file_exists($this->xmlLoc)){
-				$localTS = filemtime($this->xmlLoc);
-				if ($remoteTS <= $localTS) 
-				{
-					$getNewWSDL = false;
-				}
-			}
-			
-			if ($getNewWSDL){
-				$newWSDL = file_gET_contents($wsdlLoc);
-				file_put_contents($this->xmlLoc, $newWSDL);
-			}	
-		}
-		catch (Exception $e) {
-			throw new Exception('Unable to store local copy of WSDL file'."\n");
-		}
-	}
+
+        try{
+            $getNewWSDL = true;
+
+            $remoteTS = $this->GetLastModifiedDate($wsdlLoc);
+
+            if (file_exists($this->LocalWsdlPath())){
+                $localTS = filemtime($this->LocalWsdlPath());
+                if ($remoteTS <= $localTS)
+                {
+                    $getNewWSDL = false;
+                }
+            }
+
+            if ($getNewWSDL){
+                $newWSDL = file_get_contents($wsdlLoc);
+                file_put_contents($this->LocalWsdlPath(), $newWSDL);
+            }
+        }
+        catch (Exception $e) {
+            throw new Exception('Unable to store local copy of WSDL file'."\n");
+        }
+    }
+
+    function LocalWsdlPath()
+    {
+        $wsdlName = 'ExactTargetWSDL.xml';
+        $tmpPath = '';
+
+        // if open_basedir is set then we cannot trust sys_get_temp_dir()
+        // see http://php.net/manual/en/function.sys-get-temp-dir.php#97044
+        if ('' === ini_get('open_basedir')) {
+            $tmpPath = sys_get_temp_dir();
+
+            // sys_get_temp_dir() does not return a trailing slash on all OS's
+            // see http://php.net/manual/en/function.sys-get-temp-dir.php#80690
+            if ('/' !== substr($tmpPath, -1)) {
+                $tmpPath .= '/';
+            }
+        }
+
+        return "{$tmpPath}{$wsdlName}";
+
+    }
 	
 	function GetLastModifiedDate($remotepath) {
 		$curl = curl_init($remotepath);
@@ -1689,12 +1722,6 @@ class ET_Organization extends ET_CUDSupport {
 class ET_User extends ET_CUDSupport {
 	function __construct() {
 		$this->obj = "AccountUser";
-	}
-}
-
-class ET_Send extends ET_CUDSupport {
-	function __construct() {
-		$this->obj = "Send";
 	}
 }
 
